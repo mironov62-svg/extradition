@@ -36,6 +36,7 @@
   #btnPhoto { background: #2fc6f6; color: #fff; }
   #btnGallery { background: #7a8bff; color: #fff; }
   #btnSend { background: #1db954; color: #fff; }
+  #btnAccept { background: #f5a623; color: #fff; }
   button:disabled { opacity: 0.6; }
 
   #photos {
@@ -100,6 +101,7 @@
 <textarea id="comment" placeholder="Введите текст комментария"></textarea>
 
 <button id="btnSend" type="button">Отправить в Битрикс24</button>
+<button id="btnAccept" type="button">✅ МИ принято</button>
 
 <div id="status"></div>
 
@@ -111,6 +113,7 @@ const MANAGER_ID = "1"; // ID сотрудника для уведомления
 const MAX_SIZE = 300 * 1024;
 const MAX_PHOTOS = 3;
 const FIXED_PHRASE = "Выдача МИ в ЛУ";
+const ACCEPT_FIELD = "UF_CRM_1791016249"; // поле "МИ принято"
 
 // ==== ЭЛЕМЕНТЫ ====
 const $ = id => document.getElementById(id);
@@ -118,6 +121,7 @@ const dealIdEl = $("dealId");
 const btnPhoto = $("btnPhoto");
 const btnGallery = $("btnGallery");
 const btnSend = $("btnSend");
+const btnAccept = $("btnAccept");
 const photosEl = $("photos");
 const info = $("info");
 const status = $("status");
@@ -129,8 +133,6 @@ let photos = [];
 let isProcessing = false;
 
 // ==== ВЫБОР ФОТО ====
-// useCamera = true  → камера (capture="environment")
-// useCamera = false → системный выбор (галерея / файлы)
 function pickPhoto(useCamera) {
   if (isProcessing) return;
 
@@ -139,7 +141,6 @@ function pickPhoto(useCamera) {
     return;
   }
 
-  // Пересоздаём input — лечит «залипание» камеры на iOS/Android
   const input = document.createElement("input");
   input.type = "file";
   input.accept = "image/*";
@@ -153,7 +154,6 @@ function pickPhoto(useCamera) {
       return;
     }
 
-    // Блокируем кнопки на время обработки — исключает гонку кликов
     isProcessing = true;
     btnPhoto.disabled = true;
     btnGallery.disabled = true;
@@ -256,7 +256,7 @@ function compressImage(file, maxSize = MAX_SIZE) {
   });
 }
 
-// ==== ОТПРАВКА ====
+// ==== ОТПРАВКА КОММЕНТАРИЯ ====
 btnSend.addEventListener("click", async () => {
   const dealId = dealIdEl.value.trim();
   const comment = $("comment").value.trim();
@@ -287,7 +287,6 @@ btnSend.addEventListener("click", async () => {
       fields.FILES = photos.map(p => [p.name, p.base64]);
     }
 
-    // 1) Добавляем комментарий в таймлайн сделки
     const resp = await fetch(WEBHOOK + "crm.timeline.comment.add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -301,7 +300,6 @@ btnSend.addEventListener("click", async () => {
       return;
     }
 
-    // 2) Отправляем уведомление сотруднику
     const dealLink = `${PORTAL}/crm/deal/details/${dealId}/`;
     const notifyText = `МИ выдано.\nСделка: ${dealLink}`;
 
@@ -328,7 +326,6 @@ btnSend.addEventListener("click", async () => {
 
     showStatus("✅ Комментарий добавлен в сделку " + dealId + notifyNote, true);
 
-    // Сброс формы
     photos = [];
     renderPhotos();
     info.textContent = "";
@@ -339,6 +336,43 @@ btnSend.addEventListener("click", async () => {
     showStatus("Сетевая ошибка: " + err.message, false);
   } finally {
     btnSend.disabled = false;
+  }
+});
+
+// ==== КНОПКА «МИ ПРИНЯТО» ====
+btnAccept.addEventListener("click", async () => {
+  const dealId = dealIdEl.value.trim();
+
+  if (!dealId) return showStatus("Укажите ID сделки", false);
+
+  btnAccept.disabled = true;
+  showStatus("Обновление сделки...", true);
+
+  try {
+    const resp = await fetch(WEBHOOK + "crm.deal.update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: dealId,
+        fields: {
+          [ACCEPT_FIELD]: 1 // "Да"
+        }
+      })
+    });
+
+    const data = await resp.json();
+
+    if (data.error) {
+      showStatus("Ошибка Битрикс24: " + data.error_description, false);
+      return;
+    }
+
+    showStatus(`✅ В сделке ${dealId} поле «МИ принято» установлено в «Да»`, true);
+  } catch (err) {
+    console.error(err);
+    showStatus("Сетевая ошибка: " + err.message, false);
+  } finally {
+    btnAccept.disabled = false;
   }
 });
 
