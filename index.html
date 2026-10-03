@@ -34,6 +34,7 @@
     font-weight: 600;
   }
   #btnPhoto { background: #2fc6f6; color: #fff; }
+  #btnGallery { background: #7a8bff; color: #fff; }
   #btnSend { background: #1db954; color: #fff; }
   button:disabled { opacity: 0.6; }
 
@@ -91,6 +92,7 @@
 
 <label>Фото (до 3 штук, каждое до 300 КБ)</label>
 <button id="btnPhoto" type="button">📷 Сделать фото</button>
+<button id="btnGallery" type="button">🖼 Выбрать из галереи</button>
 <div id="photos"></div>
 <div id="info"></div>
 
@@ -114,6 +116,7 @@ const FIXED_PHRASE = "Выдача МИ в ЛУ";
 const $ = id => document.getElementById(id);
 const dealIdEl = $("dealId");
 const btnPhoto = $("btnPhoto");
+const btnGallery = $("btnGallery");
 const btnSend = $("btnSend");
 const photosEl = $("photos");
 const info = $("info");
@@ -122,8 +125,15 @@ const status = $("status");
 // Массив фото: [{ base64, name, size }]
 let photos = [];
 
-// ==== КНОПКА "СДЕЛАТЬ ФОТО" ====
-btnPhoto.addEventListener("click", () => {
+// Флаг обработки: блокирует кнопки, пока идёт сжатие
+let isProcessing = false;
+
+// ==== ВЫБОР ФОТО ====
+// useCamera = true  → камера (capture="environment")
+// useCamera = false → системный выбор (галерея / файлы)
+function pickPhoto(useCamera) {
+  if (isProcessing) return;
+
   if (photos.length >= MAX_PHOTOS) {
     info.textContent = `Достигнут лимит: ${MAX_PHOTOS} фото`;
     return;
@@ -133,7 +143,7 @@ btnPhoto.addEventListener("click", () => {
   const input = document.createElement("input");
   input.type = "file";
   input.accept = "image/*";
-  input.capture = "environment";
+  if (useCamera) input.capture = "environment";
   input.style.display = "none";
 
   input.addEventListener("change", async (e) => {
@@ -143,7 +153,12 @@ btnPhoto.addEventListener("click", () => {
       return;
     }
 
+    // Блокируем кнопки на время обработки — исключает гонку кликов
+    isProcessing = true;
+    btnPhoto.disabled = true;
+    btnGallery.disabled = true;
     info.textContent = "Обработка фото...";
+
     try {
       const { base64, size, name } = await compressImage(file);
       photos.push({ base64, name, size });
@@ -153,13 +168,19 @@ btnPhoto.addEventListener("click", () => {
       console.error(err);
       info.textContent = "Ошибка обработки фото: " + err.message;
     } finally {
+      isProcessing = false;
+      btnPhoto.disabled = false;
+      btnGallery.disabled = false;
       input.remove();
     }
   });
 
   document.body.appendChild(input);
   input.click();
-});
+}
+
+btnPhoto.addEventListener("click", () => pickPhoto(true));
+btnGallery.addEventListener("click", () => pickPhoto(false));
 
 function renderPhotos() {
   photosEl.innerHTML = "";
@@ -243,6 +264,9 @@ btnSend.addEventListener("click", async () => {
   if (!dealId) return showStatus("Укажите ID сделки", false);
   if (!comment && photos.length === 0) {
     return showStatus("Добавьте комментарий или хотя бы одно фото", false);
+  }
+  if (isProcessing) {
+    return showStatus("Дождитесь окончания обработки фото", false);
   }
 
   btnSend.disabled = true;
