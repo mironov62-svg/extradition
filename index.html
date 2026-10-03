@@ -104,6 +104,8 @@
 <script>
 // ==== НАСТРОЙКИ ====
 const WEBHOOK = "https://b24-964ige.bitrix24.ru/rest/1/0v15olo1zki4ls1k/";
+const PORTAL = "https://b24-964ige.bitrix24.ru";
+const MANAGER_ID = "1"; // ID сотрудника для уведомления
 const MAX_SIZE = 300 * 1024;
 const MAX_PHOTOS = 3;
 const FIXED_PHRASE = "Выдача МИ в ЛУ";
@@ -261,6 +263,7 @@ btnSend.addEventListener("click", async () => {
       fields.FILES = photos.map(p => [p.name, p.base64]);
     }
 
+    // 1) Добавляем комментарий в таймлайн сделки
     const resp = await fetch(WEBHOOK + "crm.timeline.comment.add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -271,13 +274,42 @@ btnSend.addEventListener("click", async () => {
 
     if (data.error) {
       showStatus("Ошибка Битрикс24: " + data.error_description, false);
-    } else {
-      showStatus("✅ Комментарий добавлен в сделку " + dealId, true);
-      photos = [];
-      renderPhotos();
-      info.textContent = "";
-      $("comment").value = "";
+      return;
     }
+
+    // 2) Отправляем уведомление сотруднику
+    const dealLink = `${PORTAL}/crm/deal/details/${dealId}/`;
+    const notifyText = `МИ выдано.\nСделка: ${dealLink}`;
+
+    let notifyNote = "";
+    try {
+      const notifyResp = await fetch(WEBHOOK + "im.message.add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          DIALOG_ID: MANAGER_ID,
+          MESSAGE: notifyText,
+          URL_PREVIEW: "Y"
+        })
+      });
+      const notifyData = await notifyResp.json();
+      if (notifyData.error) {
+        console.warn("Не удалось отправить уведомление:", notifyData.error_description);
+        notifyNote = `\n⚠️ Уведомление не отправлено: ${notifyData.error_description}`;
+      }
+    } catch (e) {
+      console.warn("Ошибка отправки уведомления:", e);
+      notifyNote = `\n⚠️ Уведомление не отправлено: ${e.message}`;
+    }
+
+    showStatus("✅ Комментарий добавлен в сделку " + dealId + notifyNote, true);
+
+    // Сброс формы
+    photos = [];
+    renderPhotos();
+    info.textContent = "";
+    $("comment").value = "";
+
   } catch (err) {
     console.error(err);
     showStatus("Сетевая ошибка: " + err.message, false);
