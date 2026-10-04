@@ -36,7 +36,6 @@
   #btnPhoto { background: #2fc6f6; color: #fff; }
   #btnGallery { background: #7a8bff; color: #fff; }
   #btnSend { background: #1db954; color: #fff; }
-  #btnAccept { background: #f5a623; color: #fff; }
   button:disabled { opacity: 0.6; }
 
   #photos {
@@ -76,12 +75,63 @@
     font-weight: 700;
   }
   #info { margin-top: 8px; font-size: 13px; color: #666; }
-  #status {
-    margin-top: 16px; padding: 12px; border-radius: 8px;
-    font-size: 14px; display: none; white-space: pre-wrap;
+
+  /* Чекбокс «МИ принято» */
+  #acceptRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 16px;
+    padding: 12px;
+    background: #fff;
+    border: 1px solid #e0e2e6;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 16px;
+    cursor: pointer;
+    user-select: none;
   }
-  .ok { background: #d4f5dd; color: #10622a; }
-  .err { background: #fad4d4; color: #7a1414; }
+  #acceptRow input[type="checkbox"] {
+    width: 22px;
+    height: 22px;
+    accent-color: #f5a623;
+    cursor: pointer;
+    margin: 0;
+  }
+  #acceptRow.busy { opacity: 0.6; pointer-events: none; }
+
+  /* Статусный блок внизу */
+  #statusBox {
+    margin-top: 20px;
+    padding: 14px;
+    border-radius: 10px;
+    font-size: 15px;
+    display: none;
+    align-items: flex-start;
+    gap: 10px;
+    line-height: 1.4;
+  }
+  #statusBox.show { display: flex; }
+  #statusBox.ok   { background: #d4f5dd; color: #10622a; }
+  #statusBox.err  { background: #fad4d4; color: #7a1414; }
+  #statusBox.warn { background: #fff3cd; color: #7a5a00; }
+
+  #statusIcon {
+    font-size: 28px;
+    line-height: 1;
+    flex: 0 0 auto;
+    margin-top: -2px;
+  }
+  #statusText { white-space: pre-wrap; flex: 1; }
+
+  /* Выделение «Да» / «Нет» в строке про МИ принято */
+  .yes {
+    color: #1db954;
+    font-weight: 700;
+  }
+  .no {
+    color: #8a8f98;
+  }
 </style>
 </head>
 <body>
@@ -91,29 +141,46 @@
 <label for="dealId">ID сделки</label>
 <input type="text" id="dealId" inputmode="numeric" placeholder="Например: 12345">
 
-<label>Фото (до 3 штук, каждое до 300 КБ)</label>
-<button id="btnPhoto" type="button">📷 Сделать фото</button>
-<button id="btnGallery" type="button">🖼 Выбрать из галереи</button>
-<div id="photos"></div>
-<div id="info"></div>
+<div id="appBody">
 
-<label for="comment">Комментарий</label>
-<textarea id="comment" placeholder="Введите текст комментария"></textarea>
+  <button id="btnPhoto" type="button">📷 Сделать фото</button>
+  <button id="btnGallery" type="button">🖼 Выбрать из галереи</button>
+  <div id="photos"></div>
+  <div id="info"></div>
 
-<button id="btnSend" type="button">Отправить в Битрикс24</button>
-<button id="btnAccept" type="button">✅ МИ принято</button>
+  <label for="comment">Комментарий</label>
+  <textarea id="comment" placeholder="Введите текст комментария"></textarea>
 
-<div id="status"></div>
+  <label id="acceptRow" for="acceptCheck">
+    <input type="checkbox" id="acceptCheck">
+    <span>МИ принято</span>
+  </label>
+
+  <button id="btnSend" type="button">Отправить в Битрикс24</button>
+
+</div>
+
+<!-- Статусный блок -->
+<div id="statusBox">
+  <div id="statusIcon"></div>
+  <div id="statusText"></div>
+</div>
 
 <script>
 // ==== НАСТРОЙКИ ====
 const WEBHOOK = "https://b24-964ige.bitrix24.ru/rest/1/0v15olo1zki4ls1k/";
 const PORTAL = "https://b24-964ige.bitrix24.ru";
-const MANAGER_ID = "1"; // ID сотрудника для уведомления
+const MANAGER_ID = "1";
 const MAX_SIZE = 300 * 1024;
 const MAX_PHOTOS = 3;
 const FIXED_PHRASE = "Выдача МИ в ЛУ";
-const ACCEPT_FIELD = "UF_CRM_1791016249"; // поле "МИ принято"
+const ACCEPT_FIELD = "UF_CRM_1791016249";
+
+// --- Воронка и стадии ---
+const CATEGORY_ID    = 12;
+const REQUIRED_STAGE = "C12:4";           // «Готово»
+const REQUIRED_STAGE_NAME = "Готово";
+const NEXT_STAGE     = "C12:UC_3M5ZEE";   // «На выдачу»
 
 // ==== ЭЛЕМЕНТЫ ====
 const $ = id => document.getElementById(id);
@@ -121,21 +188,176 @@ const dealIdEl = $("dealId");
 const btnPhoto = $("btnPhoto");
 const btnGallery = $("btnGallery");
 const btnSend = $("btnSend");
-const btnAccept = $("btnAccept");
+const acceptRow = $("acceptRow");
+const acceptCheck = $("acceptCheck");
 const photosEl = $("photos");
 const info = $("info");
-const status = $("status");
+const statusBox = $("statusBox");
+const statusIcon = $("statusIcon");
+const statusText = $("statusText");
 
-// Массив фото: [{ base64, name, size }]
 let photos = [];
-
-// Флаг обработки: блокирует кнопки, пока идёт сжатие
 let isProcessing = false;
+let isAcceptBusy = false;
+
+let stageState = null;
+let checkTimer = null;
+
+// ==== ХЕЛПЕРЫ ====
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Строка «МИ принято — Да/Нет»
+function acceptLine(isAccepted) {
+  return isAccepted
+    ? `МИ принято — <span class="yes">Да</span>`
+    : `МИ принято — <span class="no">Нет</span>`;
+}
+
+// ==== СТАТУС ====
+function setStatus(kind, html, icon) {
+  if (!html) {
+    statusBox.className = "";
+    statusText.innerHTML = "";
+    statusIcon.textContent = "";
+    return;
+  }
+  statusBox.className = "show " + kind;
+  statusIcon.textContent = icon || (kind === "ok" ? "✅" : kind === "warn" ? "⚠️" : "❗");
+  statusText.innerHTML = html;
+}
+
+function resetForm() {
+  photos = [];
+  renderPhotos();
+  info.textContent = "";
+  $("comment").value = "";
+  acceptCheck.checked = false;
+}
+
+// ==== ПРОВЕРКА СТАДИИ ====
+async function fetchDeal(dealId) {
+  const resp = await fetch(WEBHOOK + "crm.deal.get", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: dealId })
+  });
+  const data = await resp.json();
+  if (data.error) throw new Error(data.error_description || data.error);
+  return data.result;
+}
+
+const NOT_READY_MSG = `Сделка не находится на стадии «${REQUIRED_STAGE_NAME}»`;
+
+async function checkStage(dealId) {
+  if (!dealId) {
+    stageState = null;
+    setStatus("warn", "Введите ID сделки", "⚠️");
+    return;
+  }
+
+  setStatus("warn", "Проверка стадии сделки…", "⏳");
+
+  try {
+    const deal = await fetchDeal(dealId);
+    const categoryId = Number(deal.CATEGORY_ID);
+    const stageId = deal.STAGE_ID;
+
+    if (categoryId !== CATEGORY_ID || stageId !== REQUIRED_STAGE) {
+      stageState = "fail";
+      setStatus("err", escapeHtml(NOT_READY_MSG), "❗");
+      return;
+    }
+
+    stageState = "ok";
+    acceptCheck.checked = false;
+
+    setStatus(
+      "ok",
+      `Сделка на стадии «${REQUIRED_STAGE_NAME}». Можно заполнять и отправлять.<br>${acceptLine(false)}`,
+      "✅"
+    );
+
+  } catch (e) {
+    stageState = "fail";
+    setStatus("err", "Ошибка проверки сделки: " + escapeHtml(e.message), "❗");
+  }
+}
+
+// Автопроверка с дебаунсом при вводе ID
+dealIdEl.addEventListener("input", () => {
+  stageState = null;
+  setStatus("warn", "Введите ID сделки", "⚠️");
+
+  if (checkTimer) clearTimeout(checkTimer);
+  const id = dealIdEl.value.trim();
+  if (!id) return;
+
+  checkTimer = setTimeout(() => checkStage(id), 700);
+});
+
+// ==== ФЛАЖОК «МИ ПРИНЯТО» ====
+acceptCheck.addEventListener("change", async () => {
+  const dealId = dealIdEl.value.trim();
+  if (!dealId) {
+    acceptCheck.checked = false;
+    setStatus("warn", "Укажите ID сделки", "⚠️");
+    return;
+  }
+
+  if (stageState !== "ok") {
+    acceptCheck.checked = false;
+    setStatus("err", escapeHtml(NOT_READY_MSG), "❗");
+    return;
+  }
+  if (isAcceptBusy) return;
+
+  isAcceptBusy = true;
+  acceptRow.classList.add("busy");
+  setStatus("warn", "Обновление поля «МИ принято»…", "⏳");
+
+  const value = acceptCheck.checked ? 1 : 0;
+
+  try {
+    const resp = await fetch(WEBHOOK + "crm.deal.update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: dealId,
+        fields: { [ACCEPT_FIELD]: value }
+      })
+    });
+    const data = await resp.json();
+    if (data.error) {
+      acceptCheck.checked = false;
+      setStatus("err", "Ошибка Битрикс24: " + escapeHtml(data.error_description), "❗");
+      return;
+    }
+    setStatus(
+      "ok",
+      `✅ Сделка ${escapeHtml(dealId)}<br>${acceptLine(acceptCheck.checked)}`,
+      "✅"
+    );
+  } catch (err) {
+    acceptCheck.checked = false;
+    setStatus("err", "Сетевая ошибка: " + escapeHtml(err.message), "❗");
+  } finally {
+    isAcceptBusy = false;
+    acceptRow.classList.remove("busy");
+  }
+});
 
 // ==== ВЫБОР ФОТО ====
 function pickPhoto(useCamera) {
   if (isProcessing) return;
-
+  if (stageState !== "ok") {
+    setStatus("err", escapeHtml(NOT_READY_MSG), "❗");
+    return;
+  }
   if (photos.length >= MAX_PHOTOS) {
     info.textContent = `Достигнут лимит: ${MAX_PHOTOS} фото`;
     return;
@@ -208,7 +430,6 @@ function renderPhotos() {
   });
 }
 
-// Сжатие изображения через canvas
 function compressImage(file, maxSize = MAX_SIZE) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -256,33 +477,35 @@ function compressImage(file, maxSize = MAX_SIZE) {
   });
 }
 
-// ==== ОТПРАВКА КОММЕНТАРИЯ ====
+// ==== ОТПРАВКА КОММЕНТАРИЯ + ПЕРЕВОД СТАДИИ ====
 btnSend.addEventListener("click", async () => {
   const dealId = dealIdEl.value.trim();
   const comment = $("comment").value.trim();
+  const accepted = acceptCheck.checked;
 
-  if (!dealId) return showStatus("Укажите ID сделки", false);
+  if (stageState !== "ok") {
+    setStatus("err", escapeHtml(NOT_READY_MSG), "❗");
+    return;
+  }
+  if (!dealId) return setStatus("warn", "Укажите ID сделки", "⚠️");
   if (!comment && photos.length === 0) {
-    return showStatus("Добавьте комментарий или хотя бы одно фото", false);
+    return setStatus("warn", "Добавьте комментарий или хотя бы одно фото", "⚠️");
   }
   if (isProcessing) {
-    return showStatus("Дождитесь окончания обработки фото", false);
+    return setStatus("warn", "Дождитесь окончания обработки фото", "⚠️");
   }
 
   btnSend.disabled = true;
-  showStatus("Отправка...", true);
+  setStatus("warn", "Отправка...", "⏳");
 
   try {
-    const fullComment = comment
-      ? FIXED_PHRASE + "\n" + comment
-      : FIXED_PHRASE;
+    const fullComment = comment ? FIXED_PHRASE + "\n" + comment : FIXED_PHRASE;
 
     const fields = {
       ENTITY_TYPE: "deal",
       ENTITY_ID: dealId,
       COMMENT: fullComment
     };
-
     if (photos.length > 0) {
       fields.FILES = photos.map(p => [p.name, p.base64]);
     }
@@ -292,17 +515,14 @@ btnSend.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ fields: fields })
     });
-
     const data = await resp.json();
-
     if (data.error) {
-      showStatus("Ошибка Битрикс24: " + data.error_description, false);
+      setStatus("err", "Ошибка Битрикс24: " + escapeHtml(data.error_description), "❗");
       return;
     }
 
+    // Уведомление руководителю
     const dealLink = `${PORTAL}/crm/deal/details/${dealId}/`;
-    const notifyText = `МИ выдано.\nСделка: ${dealLink}`;
-
     let notifyNote = "";
     try {
       const notifyResp = await fetch(WEBHOOK + "im.message.add", {
@@ -310,77 +530,66 @@ btnSend.addEventListener("click", async () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           DIALOG_ID: MANAGER_ID,
-          MESSAGE: notifyText,
+          MESSAGE: `МИ выдано.\nСделка: ${dealLink}`,
           URL_PREVIEW: "Y"
         })
       });
       const notifyData = await notifyResp.json();
       if (notifyData.error) {
-        console.warn("Не удалось отправить уведомление:", notifyData.error_description);
-        notifyNote = `\n⚠️ Уведомление не отправлено: ${notifyData.error_description}`;
+        notifyNote = `<br>⚠️ Уведомление не отправлено: ${escapeHtml(notifyData.error_description)}`;
       }
     } catch (e) {
-      console.warn("Ошибка отправки уведомления:", e);
-      notifyNote = `\n⚠️ Уведомление не отправлено: ${e.message}`;
+      notifyNote = `<br>⚠️ Уведомление не отправлено: ${escapeHtml(e.message)}`;
     }
 
-    showStatus("✅ Комментарий добавлен в сделку " + dealId + notifyNote, true);
+    // Перевод стадии
+    let stageNote = "";
+    try {
+      const deal = await fetchDeal(dealId);
+      if (Number(deal.CATEGORY_ID) === CATEGORY_ID && deal.STAGE_ID === REQUIRED_STAGE) {
+        const upd = await fetch(WEBHOOK + "crm.deal.update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: dealId,
+            fields: { STAGE_ID: NEXT_STAGE }
+          })
+        });
+        const updData = await upd.json();
+        if (updData.error) {
+          stageNote = `<br>⚠️ Не удалось изменить стадию: ${escapeHtml(updData.error_description)}`;
+        } else {
+          stageNote = `<br>Сделка переведена на стадию "На выдачу"`;
+        }
+      } else {
+        stageNote = `<br>ℹ️ Стадия не изменена. ${escapeHtml(NOT_READY_MSG)}`;
+      }
+    } catch (e) {
+      stageNote = `<br>⚠️ Не удалось изменить стадию: ${escapeHtml(e.message)}`;
+    }
 
-    photos = [];
-    renderPhotos();
-    info.textContent = "";
-    $("comment").value = "";
+    // Сбрасываем форму
+    resetForm();
+    stageState = null;
+    dealIdEl.value = "";
+    setStatus(
+      "ok",
+      `✅ Комментарий добавлен в сделку ${escapeHtml(dealId)}` +
+      `<br>${acceptLine(accepted)}` +
+      notifyNote + stageNote,
+      "✅"
+    );
 
   } catch (err) {
     console.error(err);
-    showStatus("Сетевая ошибка: " + err.message, false);
+    setStatus("err", "Сетевая ошибка: " + escapeHtml(err.message), "❗");
   } finally {
     btnSend.disabled = false;
   }
 });
 
-// ==== КНОПКА «МИ ПРИНЯТО» ====
-btnAccept.addEventListener("click", async () => {
-  const dealId = dealIdEl.value.trim();
-
-  if (!dealId) return showStatus("Укажите ID сделки", false);
-
-  btnAccept.disabled = true;
-  showStatus("Обновление сделки...", true);
-
-  try {
-    const resp = await fetch(WEBHOOK + "crm.deal.update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: dealId,
-        fields: {
-          [ACCEPT_FIELD]: 1 // "Да"
-        }
-      })
-    });
-
-    const data = await resp.json();
-
-    if (data.error) {
-      showStatus("Ошибка Битрикс24: " + data.error_description, false);
-      return;
-    }
-
-    showStatus(`✅ В сделке ${dealId} поле «МИ принято» установлено в «Да»`, true);
-  } catch (err) {
-    console.error(err);
-    showStatus("Сетевая ошибка: " + err.message, false);
-  } finally {
-    btnAccept.disabled = false;
-  }
-});
-
-function showStatus(text, ok) {
-  status.textContent = text;
-  status.className = ok ? "ok" : "err";
-  status.style.display = "block";
-}
+// Инициализация
+setStatus("warn", "Введите ID сделки", "⚠️");
 </script>
 
 </body>
