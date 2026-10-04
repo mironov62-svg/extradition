@@ -22,8 +22,31 @@
     border: 1px solid #ccc;
     border-radius: 8px;
     box-sizing: border-box;
+    transition: border-color .15s, box-shadow .15s;
   }
   textarea { resize: vertical; min-height: 80px; }
+
+  input#dealId.err {
+    border-color: #e5484d;
+    box-shadow: 0 0 0 3px rgba(229, 72, 77, 0.15);
+  }
+  input#dealId.ok {
+    border-color: #1db954;
+    box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.15);
+  }
+
+  #dealHint {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 1.3;
+    min-height: 16px;
+    color: #666;
+    white-space: pre-wrap;
+  }
+  #dealHint.err  { color: #b3261e; font-weight: 600; }
+  #dealHint.ok   { color: #10622a; font-weight: 600; }
+  #dealHint.warn { color: #7a5a00; }
+
   button {
     width: 100%;
     padding: 14px;
@@ -76,7 +99,6 @@
   }
   #info { margin-top: 8px; font-size: 13px; color: #666; }
 
-  /* Чекбокс «МИ принято» */
   #acceptRow {
     display: flex;
     align-items: center;
@@ -100,7 +122,6 @@
   }
   #acceptRow.busy { opacity: 0.6; pointer-events: none; }
 
-  /* Статусный блок внизу */
   #statusBox {
     margin-top: 20px;
     padding: 14px;
@@ -124,14 +145,8 @@
   }
   #statusText { white-space: pre-wrap; flex: 1; }
 
-  /* Выделение «Да» / «Нет» в строке про МИ принято */
-  .yes {
-    color: #1db954;
-    font-weight: 700;
-  }
-  .no {
-    color: #8a8f98;
-  }
+  .yes { color: #1db954; font-weight: 700; }
+  .no  { color: #8a8f98; }
 </style>
 </head>
 <body>
@@ -140,6 +155,7 @@
 
 <label for="dealId">ID сделки</label>
 <input type="text" id="dealId" inputmode="numeric" placeholder="Например: 12345">
+<div id="dealHint"></div>
 
 <div id="appBody">
 
@@ -160,7 +176,6 @@
 
 </div>
 
-<!-- Статусный блок -->
 <div id="statusBox">
   <div id="statusIcon"></div>
   <div id="statusText"></div>
@@ -176,15 +191,15 @@ const MAX_PHOTOS = 3;
 const FIXED_PHRASE = "Выдача МИ в ЛУ";
 const ACCEPT_FIELD = "UF_CRM_1791016249";
 
-// --- Воронка и стадии ---
 const CATEGORY_ID    = 12;
-const REQUIRED_STAGE = "C12:4";           // «Готово»
+const REQUIRED_STAGE = "C12:4";
 const REQUIRED_STAGE_NAME = "Готово";
-const NEXT_STAGE     = "C12:UC_3M5ZEE";   // «На выдачу»
+const NEXT_STAGE     = "C12:UC_3M5ZEE";
 
 // ==== ЭЛЕМЕНТЫ ====
 const $ = id => document.getElementById(id);
 const dealIdEl = $("dealId");
+const dealHint = $("dealHint");
 const btnPhoto = $("btnPhoto");
 const btnGallery = $("btnGallery");
 const btnSend = $("btnSend");
@@ -211,14 +226,12 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
-// Строка «МИ принято — Да/Нет»
 function acceptLine(isAccepted) {
   return isAccepted
     ? `МИ принято — <span class="yes">Да</span>`
     : `МИ принято — <span class="no">Нет</span>`;
 }
 
-// ==== СТАТУС ====
 function setStatus(kind, html, icon) {
   if (!html) {
     statusBox.className = "";
@@ -229,6 +242,17 @@ function setStatus(kind, html, icon) {
   statusBox.className = "show " + kind;
   statusIcon.textContent = icon || (kind === "ok" ? "✅" : kind === "warn" ? "⚠️" : "❗");
   statusText.innerHTML = html;
+}
+
+function setDealHint(kind, text) {
+  dealIdEl.classList.remove("ok", "err");
+  dealHint.classList.remove("ok", "err", "warn");
+
+  if (kind === "ok")   dealIdEl.classList.add("ok");
+  if (kind === "err")  dealIdEl.classList.add("err");
+
+  if (kind) dealHint.classList.add(kind);
+  dealHint.textContent = text || "";
 }
 
 function resetForm() {
@@ -246,8 +270,19 @@ async function fetchDeal(dealId) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: dealId })
   });
-  const data = await resp.json();
-  if (data.error) throw new Error(data.error_description || data.error);
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    throw new Error("HTTP " + resp.status + " — ответ не JSON");
+  }
+
+  if (data.error) {
+    console.error("crm.deal.get error:", data);
+    throw new Error(data.error_description || data.error || ("HTTP " + resp.status));
+  }
+
   return data.result;
 }
 
@@ -256,10 +291,12 @@ const NOT_READY_MSG = `Сделка не находится на стадии «
 async function checkStage(dealId) {
   if (!dealId) {
     stageState = null;
+    setDealHint("warn", "Введите ID сделки");
     setStatus("warn", "Введите ID сделки", "⚠️");
     return;
   }
 
+  setDealHint("warn", "Проверка стадии сделки…");
   setStatus("warn", "Проверка стадии сделки…", "⏳");
 
   try {
@@ -267,8 +304,17 @@ async function checkStage(dealId) {
     const categoryId = Number(deal.CATEGORY_ID);
     const stageId = deal.STAGE_ID;
 
-    if (categoryId !== CATEGORY_ID || stageId !== REQUIRED_STAGE) {
+    if (categoryId !== CATEGORY_ID) {
       stageState = "fail";
+      const msg = `Сделка не в воронке 12 (CATEGORY_ID=${categoryId})`;
+      setDealHint("err", msg);
+      setStatus("err", escapeHtml(msg), "❗");
+      return;
+    }
+
+    if (stageId !== REQUIRED_STAGE) {
+      stageState = "fail";
+      setDealHint("err", NOT_READY_MSG + `\n(текущая: ${stageId})`);
       setStatus("err", escapeHtml(NOT_READY_MSG), "❗");
       return;
     }
@@ -276,6 +322,7 @@ async function checkStage(dealId) {
     stageState = "ok";
     acceptCheck.checked = false;
 
+    setDealHint("ok", `Стадия «${REQUIRED_STAGE_NAME}»`);
     setStatus(
       "ok",
       `Сделка на стадии «${REQUIRED_STAGE_NAME}». Можно заполнять и отправлять.<br>${acceptLine(false)}`,
@@ -284,18 +331,22 @@ async function checkStage(dealId) {
 
   } catch (e) {
     stageState = "fail";
+    setDealHint("err", "Ошибка: " + e.message);
     setStatus("err", "Ошибка проверки сделки: " + escapeHtml(e.message), "❗");
   }
 }
 
-// Автопроверка с дебаунсом при вводе ID
 dealIdEl.addEventListener("input", () => {
   stageState = null;
+  setDealHint(null, "");
   setStatus("warn", "Введите ID сделки", "⚠️");
 
   if (checkTimer) clearTimeout(checkTimer);
   const id = dealIdEl.value.trim();
-  if (!id) return;
+  if (!id) {
+    setDealHint("warn", "Введите ID сделки");
+    return;
+  }
 
   checkTimer = setTimeout(() => checkStage(id), 700);
 });
@@ -333,6 +384,7 @@ acceptCheck.addEventListener("change", async () => {
     });
     const data = await resp.json();
     if (data.error) {
+      console.error("crm.deal.update (accept) error:", data);
       acceptCheck.checked = false;
       setStatus("err", "Ошибка Битрикс24: " + escapeHtml(data.error_description), "❗");
       return;
@@ -343,6 +395,7 @@ acceptCheck.addEventListener("change", async () => {
       "✅"
     );
   } catch (err) {
+    console.error(err);
     acceptCheck.checked = false;
     setStatus("err", "Сетевая ошибка: " + escapeHtml(err.message), "❗");
   } finally {
@@ -477,7 +530,7 @@ function compressImage(file, maxSize = MAX_SIZE) {
   });
 }
 
-// ==== ОТПРАВКА КОММЕНТАРИЯ + ПЕРЕВОД СТАДИИ ====
+// ==== ОТПРАВКА ====
 btnSend.addEventListener("click", async () => {
   const dealId = dealIdEl.value.trim();
   const comment = $("comment").value.trim();
@@ -517,11 +570,11 @@ btnSend.addEventListener("click", async () => {
     });
     const data = await resp.json();
     if (data.error) {
+      console.error("crm.timeline.comment.add error:", data);
       setStatus("err", "Ошибка Битрикс24: " + escapeHtml(data.error_description), "❗");
       return;
     }
 
-    // Уведомление руководителю
     const dealLink = `${PORTAL}/crm/deal/details/${dealId}/`;
     let notifyNote = "";
     try {
@@ -542,7 +595,6 @@ btnSend.addEventListener("click", async () => {
       notifyNote = `<br>⚠️ Уведомление не отправлено: ${escapeHtml(e.message)}`;
     }
 
-    // Перевод стадии
     let stageNote = "";
     try {
       const deal = await fetchDeal(dealId);
@@ -568,10 +620,10 @@ btnSend.addEventListener("click", async () => {
       stageNote = `<br>⚠️ Не удалось изменить стадию: ${escapeHtml(e.message)}`;
     }
 
-    // Сбрасываем форму
     resetForm();
     stageState = null;
     dealIdEl.value = "";
+    setDealHint(null, "");
     setStatus(
       "ok",
       `✅ Комментарий добавлен в сделку ${escapeHtml(dealId)}` +
@@ -588,7 +640,7 @@ btnSend.addEventListener("click", async () => {
   }
 });
 
-// Инициализация
+setDealHint("warn", "Введите ID сделки");
 setStatus("warn", "Введите ID сделки", "⚠️");
 </script>
 
