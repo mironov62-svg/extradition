@@ -314,7 +314,7 @@ async function checkStage(dealId) {
 
     if (stageId !== REQUIRED_STAGE) {
       stageState = "fail";
-      setDealHint("err", NOT_READY_MSG + `\n(текущая: ${stageId})`);
+      setDealHint("err", NOT_READY_MSG);
       setStatus("err", escapeHtml(NOT_READY_MSG), "❗");
       return;
     }
