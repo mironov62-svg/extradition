@@ -192,9 +192,10 @@ const FIXED_PHRASE = "Выдача МИ в ЛУ";
 const ACCEPT_FIELD = "UF_CRM_1791016249";
 
 const CATEGORY_ID    = 12;
-const REQUIRED_STAGE = "C12:4";
-const REQUIRED_STAGE_NAME = "Готово";
-const NEXT_STAGE     = "C12:UC_3M5ZEE";
+const REQUIRED_STAGE = "C12:UC_3M5ZEE";
+const REQUIRED_STAGE_NAME = "На выдачу";
+const NEXT_STAGE     = "C12:WON";
+const NEXT_STAGE_NAME = "Сделка успешна";
 
 // ==== ЭЛЕМЕНТЫ ====
 const $ = id => document.getElementById(id);
@@ -306,7 +307,7 @@ async function checkStage(dealId) {
 
     if (categoryId !== CATEGORY_ID) {
       stageState = "fail";
-      const msg = `Сделка не в воронке 12 (CATEGORY_ID=${categoryId})`;
+      const msg = `Сделка не в воронке ${CATEGORY_ID} (CATEGORY_ID=${categoryId})`;
       setDealHint("err", msg);
       setStatus("err", escapeHtml(msg), "❗");
       return;
@@ -541,9 +542,6 @@ btnSend.addEventListener("click", async () => {
     return;
   }
   if (!dealId) return setStatus("warn", "Укажите ID сделки", "⚠️");
-  if (!comment && photos.length === 0) {
-    return setStatus("warn", "Добавьте комментарий или хотя бы одно фото", "⚠️");
-  }
   if (isProcessing) {
     return setStatus("warn", "Дождитесь окончания обработки фото", "⚠️");
   }
@@ -611,7 +609,7 @@ btnSend.addEventListener("click", async () => {
         if (updData.error) {
           stageNote = `<br>⚠️ Не удалось изменить стадию: ${escapeHtml(updData.error_description)}`;
         } else {
-          stageNote = `<br>Сделка переведена на стадию "На выдачу"`;
+          stageNote = `<br>Сделка переведена на стадию "${NEXT_STAGE_NAME}"`;
         }
       } else {
         stageNote = `<br>ℹ️ Стадия не изменена. ${escapeHtml(NOT_READY_MSG)}`;
