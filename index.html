@@ -501,9 +501,13 @@
 </div>
 
 <script>
-// ==== НАСТРОЙКИ ====
+// ============================================================
+//  НАСТРОЙКИ
+//  Здесь НЕТ вебхука Битрикс24. Все запросы идут через
+//  серверный прокси api.gmtnsk.ru, который хранит вебхук.
+// ============================================================
 const PROXY  = "https://api.gmtnsk.ru/proxy.php";
-const APP    = "extradition";                       // имя приложения (см. config.php на сервере) 
+const APP    = "extradition";                       // имя приложения (см. config.php на сервере)
 const PORTAL = "https://b24-964ige.bitrix24.ru";    // только для формирования ссылок
 const MAX_SIZE = 300 * 1024;
 const MAX_PHOTOS = 3;
@@ -515,6 +519,69 @@ const REQUIRED_STAGE = "C12:UC_3M5ZEE";
 const REQUIRED_STAGE_NAME = "На выдачу";
 const NEXT_STAGE     = "C12:WON";
 const NEXT_STAGE_NAME = "Сделка успешна";
+
+// ============================================================
+//  Универсальный вызов метода Битрикс24 через прокси.
+//
+//    await b24("crm.deal.get",  { id: 123 })
+//    await b24("crm.deal.update", { id: 123, fields: { ... } })
+//
+//  POST используется для методов, изменяющих данные.
+//  GET — для read-only методов.
+// ============================================================
+
+const POST_METHODS = [
+  "crm.timeline.comment.add",
+  "crm.deal.update",
+  "crm.deal.add",
+  "crm.contact.update",
+  "crm.contact.add",
+  "tasks.task.add",
+  "tasks.task.update"
+];
+
+function isPostMethod(method) {
+  return POST_METHODS.indexOf(method) !== -1;
+}
+
+async function b24(method, params = {}) {
+  const url = new URL(PROXY);
+  url.searchParams.set("app", APP);
+  url.searchParams.set("method", method);
+
+  const usePost = isPostMethod(method);
+
+  if (!usePost) {
+    for (const [k, v] of Object.entries(params)) {
+      url.searchParams.set(k, v);
+    }
+  }
+
+  const response = await fetch(url.toString(), {
+    method: usePost ? "POST" : "GET",
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/json"
+    },
+    body: usePost ? JSON.stringify(params) : undefined
+  });
+
+  let data;
+  try {
+    data = await response.json();
+  } catch (e) {
+    throw new Error("HTTP " + response.status + " — ответ не JSON");
+  }
+
+  if (data && data.error) {
+    const msg = data.error_description
+      ? `${data.error}: ${data.error_description}`
+      : data.error;
+    throw new Error(msg);
+  }
+
+  return data.result;
+}
 
 // ==== ЭЛЕМЕНТЫ ====
 const $ = id => document.getElementById(id);
@@ -585,25 +652,7 @@ function resetForm() {
 
 // ==== ПРОВЕРКА СТАДИИ ====
 async function fetchDeal(dealId) {
-  const resp = await fetch(WEBHOOK + "crm.deal.get", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id: dealId })
-  });
-
-  let data;
-  try {
-    data = await resp.json();
-  } catch (e) {
-    throw new Error("HTTP " + resp.status + " — ответ не JSON");
-  }
-
-  if (data.error) {
-    console.error("crm.deal.get error:", data);
-    throw new Error(data.error_description || data.error || ("HTTP " + resp.status));
-  }
-
-  return data.result;
+  return await b24("crm.deal.get", { id: dealId });
 }
 
 const NOT_READY_MSG = `Сделка не находится на стадии «${REQUIRED_STAGE_NAME}»`;
@@ -694,21 +743,10 @@ acceptCheck.addEventListener("change", async () => {
   const value = acceptCheck.checked ? 1 : 0;
 
   try {
-    const resp = await fetch(WEBHOOK + "crm.deal.update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: dealId,
-        fields: { [ACCEPT_FIELD]: value }
-      })
+    await b24("crm.deal.update", {
+      id: dealId,
+      fields: { [ACCEPT_FIELD]: value }
     });
-    const data = await resp.json();
-    if (data.error) {
-      console.error("crm.deal.update (accept) error:", data);
-      acceptCheck.checked = false;
-      setStatus("err", "Ошибка Битрикс24: " + escapeHtml(data.error_description), "❗");
-      return;
-    }
     setStatus(
       "ok",
       `✅ Сделка ${escapeHtml(dealId)}<br>${acceptLine(acceptCheck.checked)}`,
@@ -717,7 +755,7 @@ acceptCheck.addEventListener("change", async () => {
   } catch (err) {
     console.error(err);
     acceptCheck.checked = false;
-    setStatus("err", "Сетевая ошибка: " + escapeHtml(err.message), "❗");
+    setStatus("err", "Ошибка обновления: " + escapeHtml(err.message), "❗");
   } finally {
     isAcceptBusy = false;
     acceptRow.classList.remove("busy");
@@ -880,56 +918,19 @@ btnSend.addEventListener("click", async () => {
       fields.FILES = photos.map(p => [p.name, p.base64]);
     }
 
-    const resp = await fetch(WEBHOOK + "crm.timeline.comment.add", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fields: fields })
-    });
-    const data = await resp.json();
-    if (data.error) {
-      console.error("crm.timeline.comment.add error:", data);
-      setStatus("err", "Ошибка Битрикс24: " + escapeHtml(data.error_description), "❗");
-      return;
-    }
+    // 1. Добавляем комментарий к сделке (с фото, если есть)
+    await b24("crm.timeline.comment.add", { fields: fields });
 
-    const dealLink = `${PORTAL}/crm/deal/details/${dealId}/`;
-    let notifyNote = "";
-    try {
-      const notifyResp = await fetch(WEBHOOK + "im.message.add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          DIALOG_ID: MANAGER_ID,
-          MESSAGE: `МИ выдано.\nСделка: ${dealLink}`,
-          URL_PREVIEW: "Y"
-        })
-      });
-      const notifyData = await notifyResp.json();
-      if (notifyData.error) {
-        notifyNote = `<br>⚠️ Уведомление не отправлено: ${escapeHtml(notifyData.error_description)}`;
-      }
-    } catch (e) {
-      notifyNote = `<br>⚠️ Уведомление не отправлено: ${escapeHtml(e.message)}`;
-    }
-
+    // 2. Переводим сделку на следующую стадию
     let stageNote = "";
     try {
       const deal = await fetchDeal(dealId);
       if (Number(deal.CATEGORY_ID) === CATEGORY_ID && deal.STAGE_ID === REQUIRED_STAGE) {
-        const upd = await fetch(WEBHOOK + "crm.deal.update", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            id: dealId,
-            fields: { STAGE_ID: NEXT_STAGE }
-          })
+        await b24("crm.deal.update", {
+          id: dealId,
+          fields: { STAGE_ID: NEXT_STAGE }
         });
-        const updData = await upd.json();
-        if (updData.error) {
-          stageNote = `<br>⚠️ Не удалось изменить стадию: ${escapeHtml(updData.error_description)}`;
-        } else {
-          stageNote = `<br>Сделка переведена на стадию "${NEXT_STAGE_NAME}"`;
-        }
+        stageNote = `<br>Сделка переведена на стадию "${NEXT_STAGE_NAME}"`;
       } else {
         stageNote = `<br>ℹ️ Стадия не изменена. ${escapeHtml(NOT_READY_MSG)}`;
       }
@@ -945,7 +946,7 @@ btnSend.addEventListener("click", async () => {
       "ok",
       `✅ Комментарий добавлен в сделку ${escapeHtml(dealId)}` +
       `<br>${acceptLine(accepted)}` +
-      notifyNote + stageNote,
+      stageNote,
       "✅"
     );
 
